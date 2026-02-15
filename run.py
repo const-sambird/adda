@@ -41,6 +41,8 @@ def create_arguments():
     parser.add_argument('-w', '--storage-budget', type=int, help='storage budget')
     parser.add_argument('--cost-normalisation-factor', type=float, default=80000000)
     parser.add_argument('--benefit-normalisation-factor', type=float, default=100000)
+    parser.add_argument('-n', '--num-reads', type=int, default=100, help='number of annealer reads')
+    parser.add_argument('-d', '--dry-run', action='store_true', help='don\'t actually run the annealer')
     #parser.add_argument('problem')
 
     return parser.parse_args()
@@ -103,9 +105,14 @@ def optimise(args):
     
     print('+++ creating QUBO')
     qubo = make_qubo(500, len(replicas), [i for i in range(n_templates)], [], [i for i in range(len(candidates))], baseline, [1 for _ in candidates], benefits, 1, storage_constraints)
+    
+    if args.dry_run:
+        print('!!! stop due to user request')
+        return
+    
     print('+++ starting annealing')
     tic = time.time()
-    result = anneal(qubo, 'anneal' if args.quantum else 'exact').first
+    result = anneal(qubo, 'anneal' if args.quantum else 'exact', args.num_reads).first
     toc = time.time()
     print(f'+++ ! annealing complete in {round(toc - tic, 2)}s')
     print('energy', result.energy)
@@ -128,8 +135,6 @@ def optimise(args):
     print('- Routing table')
     print(routes)
 
-    #with open('output.pkl', 'wb') as outfile:
-    #    pickle.dump(result, outfile)
     with open('output.log', 'w') as outfile:
         outfile.write(str(result))
 

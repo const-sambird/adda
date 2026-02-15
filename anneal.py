@@ -47,8 +47,8 @@ def make_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, additional_constraints = [
     for q in Q:
         constraint_model = BinaryQuadraticModel('BINARY')
         for r in range(n_replicas):
-            constraint_model.add_linear(f't-q{q}-r{r}', -1)
-        constraint_model.offset = m
+            constraint_model.add_linear(f't-q{q}-r{r}', 1)
+        constraint_model.offset = -m
         hubo = square_bqm_to_binary_polynomial(constraint_model)
         qubo = make_quadratic(hubo, 1, 'BINARY')
         apply_penalty_lagrangian(qubo, 1e50)
