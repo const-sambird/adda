@@ -101,6 +101,7 @@ def optimise(args):
         constraint_model.offset = STORAGE_BUDGET
         hubo = square_bqm_to_binary_polynomial(constraint_model)
         qubo = make_quadratic(hubo, 10000, 'BINARY')
+        apply_penalty_lagrangian(qubo, 1e25)
         storage_constraints.append(qubo)
     
     print('+++ creating QUBO')
@@ -121,16 +122,19 @@ def optimise(args):
 
     for r in range(len(replicas)):
         indexes.append([])
+        space = 0
         print('- Replica', r)
         for i in range(len(candidates)):
             if result.sample[f'x-i{i}-r{r}'] == 1:
                 indexes[r].append(candidates[i])
                 print('\t', candidates[i])
+                space += costs[i]
         for q in range(n_templates):
             if result.sample[f't-q{q}-r{r}'] == 1:
                 if routes[q] != -1:
                     print('!! warn: query', q, 'routed to multiple replicas. inspect output!')
                 routes[q] = r
+        print(f'-- Space used: {space}/{STORAGE_BUDGET}')
 
     print('- Index output for benchmarking module')
     idx_string = []
@@ -140,7 +144,7 @@ def optimise(args):
     print(' '.join(idx_string))
     
     print('- Routing table')
-    print(routes)
+    print(','.join([str(r) for r in routes]))
 
     with open('output.log', 'w') as outfile:
         outfile.write(str(result))

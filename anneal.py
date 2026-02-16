@@ -53,9 +53,6 @@ def make_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, additional_constraints = [
         qubo = make_quadratic(hubo, 1, 'BINARY')
         apply_penalty_lagrangian(qubo, 1e50)
         models.append(qubo)
-    
-    for c in additional_constraints:
-        apply_penalty_lagrangian(c)
 
     return quicksum([objective, *models, *additional_constraints])
 
