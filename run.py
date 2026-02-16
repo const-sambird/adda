@@ -131,6 +131,13 @@ def optimise(args):
                 if routes[q] != -1:
                     print('!! warn: query', q, 'routed to multiple replicas. inspect output!')
                 routes[q] = r
+
+    print('- Index output for benchmarking module')
+    idx_string = []
+    for i_r, config in enumerate(indexes):
+        for index in config:
+            idx_string.append(f'{i_r},{index.column}')
+    print(' '.join(idx_string))
     
     print('- Routing table')
     print(routes)
