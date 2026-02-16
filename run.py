@@ -73,6 +73,7 @@ def optimise(args):
     estimator = CostEstimator(replicas, candidates, workload, templates, n_templates)
     benefits = estimator.get_benefits()
     costs = estimator.get_storage_costs()
+    true_costs = costs.copy()
     baseline = estimator.get_baseline()
     print('+++ cost/benefit estimation complete')
 
@@ -80,7 +81,7 @@ def optimise(args):
     for i in range(len(benefits)):
         for j in range(len(benefits[i])):
             benefits[i][j] = benefits[i][j] // args.benefit_normalisation_factor
-    costs = [c // args.cost_normalisation_factor for c in costs]
+    costs = [max(0, c // args.cost_normalisation_factor) for c in costs]
     STORAGE_BUDGET = args.storage_budget // args.cost_normalisation_factor
 
     print('- benefits')
@@ -128,13 +129,13 @@ def optimise(args):
             if result.sample[f'x-i{i}-r{r}'] == 1:
                 indexes[r].append(candidates[i])
                 print('\t', candidates[i])
-                space += costs[i]
+                space += true_costs[i]
         for q in range(n_templates):
             if result.sample[f't-q{q}-r{r}'] == 1:
                 if routes[q] != -1:
                     print('!! warn: query', q, 'routed to multiple replicas. inspect output!')
                 routes[q] = r
-        print(f'-- Space used: {space}/{STORAGE_BUDGET}')
+        print(f'-- Space used: {space}/{args.storage_budget} ({round(space / args.storage_budget, 4) * 100}%)')
 
     print('- Index output for benchmarking module')
     idx_string = []
