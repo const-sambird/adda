@@ -3,3 +3,5 @@ replicas.csv
 __pycache__/
 workload/
 output.log
+model.pkl
+verify.py

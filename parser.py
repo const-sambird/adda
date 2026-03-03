@@ -67,6 +67,7 @@ class WorkloadParser:
         query_nums = list(set([int(q[1].strip('.sql')) for q in name_parts]))
 
         for i, template in enumerate(template_strs):
+            #if int(template) > 3: continue
             for query_num in query_nums:
                 with open(f'{path}/{template}_{query_num}.sql', 'r') as infile:
                     lines = infile.readlines()
