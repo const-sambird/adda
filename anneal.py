@@ -72,6 +72,15 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
                    the replica-load terms regardless of problem size.
                    This is the constraint that must never be violated.
     """
+    # Sanity check: Z_max should be achievable by a single replica
+    max_single_replica_load = sum(f[q] * c[q] / m for q in Q)
+    if Z_max > max_single_replica_load * 2:
+        import warnings
+        warnings.warn(
+            f'Z_max={Z_max} is more than 2x the maximum possible single-replica '
+            f'load ({max_single_replica_load:.0f}). This inflates slack variable '
+            f'coefficients and worsens the energy landscape. Consider tightening Z_max.'
+        )
     if additional_constraints is None:
         additional_constraints = []
 

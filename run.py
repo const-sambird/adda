@@ -1,6 +1,7 @@
 import argparse
 import pickle
 import time
+import math
 from dimod import BinaryQuadraticModel, make_quadratic, quicksum
 
 from replica import Replica
@@ -244,7 +245,12 @@ def optimise(args):
 
     # Z_max: upper bound on the maximum possible replica workload cost.
     # Using sum(baseline) is conservative (all queries on one replica, no indexes).
-    Z_max = sum(baseline)
+    n_replicas = len(replicas)
+    queries_per_replica = math.ceil(n_templates / n_replicas)
+    top_costs = sorted(baseline, reverse=True)[:queries_per_replica]
+    Z_max = int(sum(top_costs) * 1.5)
+    print(sum(sorted(baseline, reverse=True)[:8]), sorted(baseline, reverse=True)[:8])
+    print(f'- Z_max (tightened): {Z_max} (was {sum(baseline)})')
 
     print('- baseline:', baseline)
     print('- benefits:', benefits)
@@ -338,6 +344,23 @@ def optimise(args):
     print('objective (z)', get_objective_value(result.sample))
     for r in range(len(replicas)):
         print(f'slack s^({r})', get_slack_value(result.sample, r))
+    
+    for r in range(len(replicas)):
+        z_val = sum(2**k * int(result.sample[f'z-{k}']) 
+                    for k in range(math.floor(math.log2(Z_max)) + 1))
+        load_val = sum(
+            result.sample[f't-q{q}-r{r}'] * (
+                1 * baseline[q] / 1 - 
+                sum(1 * benefits[i][q] / 1 * int(result.sample[f'x-i{i}-r{r}']) 
+                    for i in range(len(candidates)))
+            )
+            for q in range(n_templates)
+        )
+        slack_val = sum(2**k * int(result.sample[f's-r{r}-{k}']) 
+                    for k in range(math.floor(math.log2(Z_max)) + 1))
+        residual = z_val - load_val - slack_val
+        print(f'replica {r}: z={z_val:.3f}, load={load_val:.3f}, '
+            f'slack={slack_val:.3f}, residual={residual:.3f}')
 
     indexes = []
     routes = [-1 for _ in range(n_templates)]
