@@ -1,7 +1,7 @@
 import argparse
 import pickle
 import time
-from dimod import BinaryQuadraticModel, make_quadratic
+from dimod import BinaryQuadraticModel, make_quadratic, quicksum
 
 from replica import Replica
 from parser import WorkloadParser
@@ -9,6 +9,7 @@ from cost_estimator import CostEstimator
 from optim import QAOAOptimiser
 from qubo import Algorithm
 from anneal import (
+    create_slack_variables,
     make_max_cost_qubo, make_total_cost_qubo, anneal,
     make_storage_constraint
 )
@@ -71,6 +72,108 @@ def get_cost(sample, replica, baseline, benefits, n_queries, n_candidates):
                 cost -= benefits[index][query]
     return cost
 
+def decompose_energy(sample, qubo, objective_bqm, components: dict, full_qubo_offset: float = 0.0):
+    print('\n+++ energy decomposition')
+    total = 0  # start with the full QUBO's offset (usually 0)
+
+    obj_energy = objective_bqm.energy(sample.sample)# - objective_bqm.offset
+    print(f'  {"objective":<22} {obj_energy:>20.2f}')
+    total += obj_energy
+
+    for name, value in components.items():
+        if name.startswith('lam_'):
+            print(f'  {"lambda " + name[4:]:<22} {value:>20.6g}')
+            continue
+        e = value.energy(sample.sample)# - value.offset
+        print(f'  {name:<22} {e:>20.2f}')
+        total += e
+
+    print(f'  {"─" * 44}')
+    print(f'  {"total (recomputed)":<22} {total:>20.2f}')
+    print(f'  {"reported energy":<22} {sample.energy:>20.2f}')
+    discrepancy = abs(total - sample.energy)
+    if discrepancy > 1.0:
+        print(f'  !! discrepancy of {discrepancy:.2f} — check for missing components')
+    
+        print('\n+++ offset audit')
+        print(f'  full_qubo offset:         {qubo.offset:.2f}')
+        print(f'  objective offset:         {objective_bqm.offset:.2f}')
+        for name, value in components.items():
+            if not name.startswith('lam_'):
+                print(f'  {name} offset: {value.offset:.2f}')
+        sum_offsets = objective_bqm.offset + sum(
+            v.offset for k, v in components.items() if not k.startswith('lam_')
+        )
+        print(f'  sum of component offsets: {sum_offsets:.2f}')
+        print(f'  discrepancy in offsets:   {qubo.offset - sum_offsets:.2f}')
+
+        print('\n+++ variable bias audit')
+        # Rebuild the sum of all component BQMs
+        from dimod import BinaryQuadraticModel, quicksum as qs
+        all_components = [objective_bqm] + [
+            v for k, v in components.items() if not k.startswith('lam_')
+        ]
+        summed = qs(all_components)
+
+        # Compare coefficients
+        print(f'  full_qubo num_variables:    {qubo.num_variables}')
+        print(f'  summed components vars:     {summed.num_variables}')
+        print(f'  full_qubo num_interactions: {qubo.num_interactions}')
+        print(f'  summed interactions:        {summed.num_interactions}')
+
+        # Find variables/interactions in full_qubo not in summed
+        missing_linear = {}
+        for v, bias in qubo.iter_linear():
+            diff = bias - summed.get_linear(v) if v in summed.variables else bias
+            if abs(diff) > 1e-6:
+                missing_linear[v] = diff
+        print(f'  linear coefficient mismatches: {len(missing_linear)}')
+
+        missing_quad = {}
+        for u, v, bias in qubo.iter_quadratic():
+            try:
+                diff = bias - summed.get_quadratic(u, v)
+            except Exception:
+                diff = bias
+            if abs(diff) > 1e-6:
+                missing_quad[(u,v)] = diff
+        print(f'  quadratic coefficient mismatches: {len(missing_quad)}')
+        if missing_quad:
+            # Show a sample of the missing interactions
+            items = list(missing_quad.items())[:5]
+            for (u,v), d in items:
+                print(f'    ({u}, {v}): diff={d:.4g}')
+    replica_load_combined = components.get('replica_load')
+    aux_vars = [v for v in replica_load_combined.variables 
+                if '*' in str(v) or 'aux' in str(v).lower()]
+    print(f'auxiliary variables in replica_load: {len(aux_vars)}')
+    aux_energy = sum(
+        replica_load_combined.get_linear(v) * sample.sample[v]
+        for v in aux_vars
+    ) + sum(
+        replica_load_combined.get_quadratic(u, v) * sample.sample[u] * sample.sample[v]
+        for u, v in replica_load_combined.quadratic
+        if '*' in str(u)
+    )
+    print(f'auxiliary variable energy contribution: {aux_energy:.2f}')
+    original_vars = [v for v in replica_load_combined.variables 
+                 if '*' not in str(v) and 'aux' not in str(v).lower()]
+
+    linear_energy = sum(
+        replica_load_combined.get_linear(v) * sample.sample[v]
+        for v in original_vars
+    )
+    quadratic_energy = sum(
+        replica_load_combined.get_quadratic(u, v) * sample.sample[u] * sample.sample[v]
+        for u, v in replica_load_combined.quadratic
+        if '*' not in str(u) and '*' not in str(v)
+        and 'aux' not in str(u).lower() and 'aux' not in str(v).lower()
+    )
+    print(f'original variable linear energy:     {linear_energy:.2f}')
+    print(f'original variable quadratic energy:  {quadratic_energy:.2f}')
+    print(f'auxiliary variable energy:           {aux_energy:.2f}')
+    print(f'offset:                              {replica_load_combined.offset:.2f}')
+    print(f'sum:                                 {linear_energy + quadratic_energy + aux_energy + replica_load_combined.offset:.2f}')
 
 def create_arguments():
     parser = argparse.ArgumentParser()
@@ -149,18 +252,13 @@ def optimise(args):
     print('- storage budget:', STORAGE_BUDGET)
     print('- Z_max:', Z_max)
 
-    # Storage budget constraints, one per replica.
-    # Lambda is calibrated relative to Z_max via make_storage_constraint.
-    storage_constraints = []
-    if args.storage_budget:
-        for r in range(len(replicas)):
-            storage_constraints.append(
-                make_storage_constraint(r, candidates, costs, STORAGE_BUDGET, Z_max)
-            )
-
     print('+++ creating QUBO')
+    # Storage constraints are built AFTER the main QUBO so that lam_storage
+    # can be derived from replica_load_combined (available in components),
+    # keeping lam_storage in the same tier as lam_routing.
+    objective_bqm = create_slack_variables('z', max(1, Z_max))  # kept for decomposition
     if args.basis == 'max':
-        qubo = make_max_cost_qubo(
+        qubo, components = make_max_cost_qubo(
             Z_max,
             len(replicas),
             list(range(n_templates)),
@@ -170,10 +268,10 @@ def optimise(args):
             [1 for _ in candidates],
             benefits,
             1,
-            storage_constraints
         )
     else:
-        qubo = make_total_cost_qubo(
+        objective_bqm = None   # total-cost objective has no z slack; use None
+        qubo, components = make_total_cost_qubo(
             len(replicas),
             list(range(n_templates)),
             [],
@@ -182,10 +280,29 @@ def optimise(args):
             [1 for _ in candidates],
             benefits,
             1,
-            storage_constraints
         )
+
+    # Now build storage constraints calibrated from the assembled replica_load BQM.
+    if args.storage_budget:
+        calibration_bqm = objective_bqm
+        storage_bqms = []
+        for r in range(len(replicas)):
+            sc = make_storage_constraint(
+                r, candidates, costs, STORAGE_BUDGET, calibration_bqm
+            )
+            storage_bqms.append(sc)
+            qubo.update(sc)
+        components['storage'] = quicksum(storage_bqms)
+        from anneal import penalty_lambda_from_objective
+        components['lam_storage'] = penalty_lambda_from_objective(calibration_bqm, multiplier=2.0)
     print(f'- created {args.basis} cost QUBO '
           f'({qubo.num_variables} variables, {qubo.num_interactions} interactions)')
+    print('+++ lambda values used')
+    for k, v in components.items():
+        if k.startswith('lam_'):
+            print(f'  {k}: {v:.6g}')
+    
+    #qubo.offset = 0.0
 
     if args.dry_run:
         print('!!! stop due to user request')
@@ -198,7 +315,24 @@ def optimise(args):
     tic = time.time()
     reads = anneal(qubo, 'anneal' if args.quantum else 'exact', args.num_reads)
     toc = time.time()
-    result = reads.first
+
+    best_cost = float('inf')
+    result = None
+    for i, read in enumerate(reads.data()):
+        read_pred_costs = []
+        for r in range(len(replicas)):
+            read_pred_costs.append(
+                get_cost(read.sample, r, baseline, benefits, n_templates, len(candidates))
+            )
+        if args.basis == 'max':
+            this_cost = max(read_pred_costs)
+        else:
+            this_cost = sum(read_pred_costs)
+        
+        if this_cost < best_cost:
+            best_cost = this_cost
+            result = read
+
     print(f'+++ ! annealing complete in {round(toc - tic, 2)}s')
     print('energy', result.energy)
     print('objective (z)', get_objective_value(result.sample))
@@ -231,6 +365,21 @@ def optimise(args):
         print(f'-- Space used: {space}/{args.storage_budget} '
               f'({round(space / args.storage_budget, 4) * 100}%) '
               f'({coeff_space} / {STORAGE_BUDGET})')
+
+    # Energy decomposition: shows relative scale of objective vs each penalty term
+    if objective_bqm is not None:
+        print(f'  manual energy check: {qubo.energy(result.sample):.2f}')
+        Q, qubo_offset = qubo.to_qubo()
+        from dimod import BinaryQuadraticModel
+        qubo_from_matrix = BinaryQuadraticModel.from_qubo(Q)
+        print(f'  qubo_offset: {qubo_offset:.2f}')
+        print(f'  energy via from_qubo (no offset): {qubo_from_matrix.energy(result.sample):.2f}')
+        print(f'  energy via from_qubo + offset:    {qubo_from_matrix.energy(result.sample) + qubo_offset:.2f}')
+        decompose_energy(result, qubo, objective_bqm, components, qubo.offset)
+    else:
+        # For total-cost basis, reconstruct a minimal objective proxy
+        from dimod import BinaryQuadraticModel as _ObjBQM
+        decompose_energy(result, qubo, _ObjBQM('BINARY'), components)
 
     print('- Index output for benchmarking module')
     idx_string = []
