@@ -7,13 +7,13 @@ from dimod import BinaryQuadraticModel, make_quadratic, quicksum
 from replica import Replica
 from parser import WorkloadParser
 from cost_estimator import CostEstimator
-from optim import QAOAOptimiser
-from qubo import Algorithm
 from anneal import (
     create_slack_variables,
     make_max_cost_qubo, make_total_cost_qubo, anneal,
-    make_storage_constraint
+    make_storage_constraint, omega
 )
+from problem import PROBLEMS
+from index_candidate import DummyIndexCandidate
 
 
 def get_replicas(path='./replicas.csv') -> list[Replica]:
@@ -62,16 +62,23 @@ def get_slack_value(sample, replica=0):
     return value
 
 
-def get_cost(sample, replica, baseline, benefits, n_queries, n_candidates):
+def get_cost(sample, replica, baseline, benefits, n_queries, n_candidates, queries):
     cost = 0
     for query in range(n_queries):
-        if sample[f't-q{query}-r{replica}'] == 0:
+        if query in queries and sample[f't-q{query}-r{replica}'] == 0:
             continue
         cost += baseline[query]
         for index in range(n_candidates):
             if sample[f'x-i{index}-r{replica}'] == 1:
                 cost -= benefits[index][query]
     return cost
+
+def is_feasible(sample, n_queries):
+    for q in range(n_queries):
+        ts = [v for k, v in sample.items() if f't-q{q}-' in k]
+        if sum(ts) == 0:
+            return False
+    return True
 
 def decompose_energy(sample, qubo, objective_bqm, components: dict, full_qubo_offset: float = 0.0):
     print('\n+++ energy decomposition')
@@ -96,93 +103,18 @@ def decompose_energy(sample, qubo, objective_bqm, components: dict, full_qubo_of
     if discrepancy > 1.0:
         print(f'  !! discrepancy of {discrepancy:.2f} — check for missing components')
     
-        print('\n+++ offset audit')
-        print(f'  full_qubo offset:         {qubo.offset:.2f}')
-        print(f'  objective offset:         {objective_bqm.offset:.2f}')
-        for name, value in components.items():
-            if not name.startswith('lam_'):
-                print(f'  {name} offset: {value.offset:.2f}')
-        sum_offsets = objective_bqm.offset + sum(
-            v.offset for k, v in components.items() if not k.startswith('lam_')
-        )
-        print(f'  sum of component offsets: {sum_offsets:.2f}')
-        print(f'  discrepancy in offsets:   {qubo.offset - sum_offsets:.2f}')
-
-        print('\n+++ variable bias audit')
-        # Rebuild the sum of all component BQMs
-        from dimod import BinaryQuadraticModel, quicksum as qs
-        all_components = [objective_bqm] + [
-            v for k, v in components.items() if not k.startswith('lam_')
-        ]
-        summed = qs(all_components)
-
-        # Compare coefficients
-        print(f'  full_qubo num_variables:    {qubo.num_variables}')
-        print(f'  summed components vars:     {summed.num_variables}')
-        print(f'  full_qubo num_interactions: {qubo.num_interactions}')
-        print(f'  summed interactions:        {summed.num_interactions}')
-
-        # Find variables/interactions in full_qubo not in summed
-        missing_linear = {}
-        for v, bias in qubo.iter_linear():
-            diff = bias - summed.get_linear(v) if v in summed.variables else bias
-            if abs(diff) > 1e-6:
-                missing_linear[v] = diff
-        print(f'  linear coefficient mismatches: {len(missing_linear)}')
-
-        missing_quad = {}
-        for u, v, bias in qubo.iter_quadratic():
-            try:
-                diff = bias - summed.get_quadratic(u, v)
-            except Exception:
-                diff = bias
-            if abs(diff) > 1e-6:
-                missing_quad[(u,v)] = diff
-        print(f'  quadratic coefficient mismatches: {len(missing_quad)}')
-        if missing_quad:
-            # Show a sample of the missing interactions
-            items = list(missing_quad.items())[:5]
-            for (u,v), d in items:
-                print(f'    ({u}, {v}): diff={d:.4g}')
     replica_load_combined = components.get('replica_load')
     aux_vars = [v for v in replica_load_combined.variables 
                 if '*' in str(v) or 'aux' in str(v).lower()]
     print(f'auxiliary variables in replica_load: {len(aux_vars)}')
-    aux_energy = sum(
-        replica_load_combined.get_linear(v) * sample.sample[v]
-        for v in aux_vars
-    ) + sum(
-        replica_load_combined.get_quadratic(u, v) * sample.sample[u] * sample.sample[v]
-        for u, v in replica_load_combined.quadratic
-        if '*' in str(u)
-    )
-    print(f'auxiliary variable energy contribution: {aux_energy:.2f}')
-    original_vars = [v for v in replica_load_combined.variables 
-                 if '*' not in str(v) and 'aux' not in str(v).lower()]
-
-    linear_energy = sum(
-        replica_load_combined.get_linear(v) * sample.sample[v]
-        for v in original_vars
-    )
-    quadratic_energy = sum(
-        replica_load_combined.get_quadratic(u, v) * sample.sample[u] * sample.sample[v]
-        for u, v in replica_load_combined.quadratic
-        if '*' not in str(u) and '*' not in str(v)
-        and 'aux' not in str(u).lower() and 'aux' not in str(v).lower()
-    )
-    print(f'original variable linear energy:     {linear_energy:.2f}')
-    print(f'original variable quadratic energy:  {quadratic_energy:.2f}')
-    print(f'auxiliary variable energy:           {aux_energy:.2f}')
-    print(f'offset:                              {replica_load_combined.offset:.2f}')
-    print(f'sum:                                 {linear_energy + quadratic_energy + aux_energy + replica_load_combined.offset:.2f}')
 
 def create_arguments():
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-q', '--quantum', action='store_true',
                         help='use a real quantum computer')
-    parser.add_argument('-r', '--qaoa-reps', type=int, default=1,
-                        help='number of repetitions to use in the QAOA ansatz')
+    parser.add_argument('-a', '--qaoa', action='store_true',
+                        help='use the quantum approximate optimisation algorithm instead of annealing')
 
     parser.add_argument('-A', '--penalty-term-A', type=int, default=100,
                         help='penalty term A in the QUBO')
@@ -199,6 +131,7 @@ def create_arguments():
                         help='number of annealer reads')
     parser.add_argument('-d', '--dry-run', action='store_true',
                         help="don't actually run the annealer")
+    parser.add_argument('-p', '--problem', choices=PROBLEMS.keys(), type=str)
     parser.add_argument('basis', type=str, choices=['total', 'max'],
                         help='cost basis for objective function')
 
@@ -208,49 +141,71 @@ def create_arguments():
 def optimise(args):
     replicas = get_replicas()
     parser = WorkloadParser(replicas[0])
-    parser.read_queries('./workload')
+    parser.read_queries('./tpcc-workload')
     parser.get_all_columns()
     parser.extract_candidates()
 
-    workload = parser.get_workload()
-    templates = parser.get_templates()
-    candidates = parser.get_candidates()
-    n_templates = max(templates) + 1
+    if args.problem:
+        problem = PROBLEMS[args.problem]
+        benefits = problem.benefits
+        costs = problem.weights
+        true_costs = costs.copy()
+        baseline = problem.baseline
+        STORAGE_BUDGET = problem.budget
+        queries = [i for i in range(len(baseline))]
+        updates = []
+        candidates = [DummyIndexCandidate(i) for i in range(len(costs))]
+        n_templates = len(baseline)
+        n_replicas = len(replicas)
+        print('+++ loaded problem', problem.name)
+        print(n_templates, 'queries')
+        print(n_templates, 'templates')
+        print(len(candidates), 'candidates')
+        print(len(replicas), 'replicas')
+        print()
+        print('index candidates:')
+        for candidate in candidates:
+            print('\t', candidate)
+    else:
+        workload = parser.get_workload()
+        templates = parser.get_templates()
+        queries = parser.get_queries()
+        updates = parser.get_updates()
+        candidates = parser.get_candidates()
+        n_templates = parser.get_num_templates()
+        n_replicas = len(replicas)
 
-    print('+++ workload parsing complete')
-    print(len(workload), 'queries')
-    print(n_templates, 'templates')
-    print(len(candidates), 'candidates')
-    print(len(replicas), 'replicas')
-    print()
-    print('index candidates:')
-    for candidate in candidates:
-        print('\t', candidate)
+        print('+++ workload parsing complete')
+        print(len(workload), 'statements')
+        print(queries)
+        print(updates)
+        print(n_templates, 'templates', f'({len(queries)} queries, {len(updates)} updates)')
+        print(len(candidates), 'candidates')
+        print(len(replicas), 'replicas')
+        print()
+        print('index candidates:')
+        for candidate in candidates:
+            print('\t', candidate)
 
-    print('+++ starting cost/benefit estimation')
-    estimator = CostEstimator(replicas, candidates, workload, templates, n_templates)
-    benefits = estimator.get_benefits()
-    costs = estimator.get_storage_costs()
-    true_costs = costs.copy()
-    baseline = estimator.get_baseline()
-    print('+++ cost/benefit estimation complete')
+        print('+++ starting cost/benefit estimation')
+        estimator = CostEstimator(replicas, candidates, workload, templates, n_templates)
+        benefits = estimator.get_benefits()
+        costs = estimator.get_storage_costs()
+        true_costs = costs.copy()
+        baseline = estimator.get_baseline()
+        print('+++ cost/benefit estimation complete')
 
-    print('+++ starting optimisation!')
-    for i in range(len(benefits)):
-        for j in range(len(benefits[i])):
-            benefits[i][j] = benefits[i][j] // args.benefit_normalisation_factor
-    baseline = [max(0, b // args.benefit_normalisation_factor) for b in baseline]
-    costs = [max(0, c // args.cost_normalisation_factor) for c in costs]
-    STORAGE_BUDGET = args.storage_budget // args.cost_normalisation_factor
+        print('+++ starting optimisation!')
+        for i in range(len(benefits)):
+            for j in range(len(benefits[i])):
+                benefits[i][j] = benefits[i][j] // args.benefit_normalisation_factor
+        baseline = [max(0, b // args.benefit_normalisation_factor) for b in baseline]
+        costs = [max(0, c // args.cost_normalisation_factor) for c in costs]
+        STORAGE_BUDGET = args.storage_budget // args.cost_normalisation_factor
 
     # Z_max: upper bound on the maximum possible replica workload cost.
     # Using sum(baseline) is conservative (all queries on one replica, no indexes).
-    n_replicas = len(replicas)
-    queries_per_replica = math.ceil(n_templates / n_replicas)
-    top_costs = sorted(baseline, reverse=True)[:queries_per_replica]
-    Z_max = int(sum(top_costs) * 1.5)
-    print(sum(sorted(baseline, reverse=True)[:8]), sorted(baseline, reverse=True)[:8])
-    print(f'- Z_max (tightened): {Z_max} (was {sum(baseline)})')
+    Z_max = omega(queries, updates, [i for i in range(len(candidates))], baseline, [1 for _ in range(n_templates)], n_replicas)
 
     print('- baseline:', baseline)
     print('- benefits:', benefits)
@@ -267,40 +222,39 @@ def optimise(args):
         qubo, components = make_max_cost_qubo(
             Z_max,
             len(replicas),
-            list(range(n_templates)),
-            [],
+            queries,
+            updates,
             list(range(len(candidates))),
             baseline,
-            [1 for _ in candidates],
+            [1 for _ in range(n_templates)],
             benefits,
             1,
         )
     else:
-        objective_bqm = None   # total-cost objective has no z slack; use None
         qubo, components = make_total_cost_qubo(
             len(replicas),
-            list(range(n_templates)),
-            [],
+            queries,
+            updates,
             list(range(len(candidates))),
             baseline,
-            [1 for _ in candidates],
+            [1 for _ in range(n_templates)],
             benefits,
             1,
         )
+        objective_bqm = components['objective']
 
     # Now build storage constraints calibrated from the assembled replica_load BQM.
-    if args.storage_budget:
+    if args.storage_budget or args.problem:
         calibration_bqm = objective_bqm
         storage_bqms = []
         for r in range(len(replicas)):
-            sc = make_storage_constraint(
-                r, candidates, costs, STORAGE_BUDGET, calibration_bqm
+            sc, lam = make_storage_constraint(
+                r, candidates, costs, STORAGE_BUDGET, calibration_bqm, list(range(n_templates)), [], n_replicas, baseline
             )
             storage_bqms.append(sc)
             qubo.update(sc)
         components['storage'] = quicksum(storage_bqms)
-        from anneal import penalty_lambda_from_objective
-        components['lam_storage'] = penalty_lambda_from_objective(calibration_bqm, multiplier=2.0)
+        components['lam_storage'] = lam
     print(f'- created {args.basis} cost QUBO '
           f'({qubo.num_variables} variables, {qubo.num_interactions} interactions)')
     print('+++ lambda values used')
@@ -319,7 +273,7 @@ def optimise(args):
 
     print('+++ starting annealing')
     tic = time.time()
-    reads = anneal(qubo, 'anneal' if args.quantum else 'exact', args.num_reads)
+    reads = anneal(qubo, 'qaoa' if args.qaoa else 'anneal', 'quantum' if args.quantum else 'simulate', args.num_reads)
     toc = time.time()
 
     best_cost = float('inf')
@@ -328,7 +282,7 @@ def optimise(args):
         read_pred_costs = []
         for r in range(len(replicas)):
             read_pred_costs.append(
-                get_cost(read.sample, r, baseline, benefits, n_templates, len(candidates))
+                get_cost(read.sample, r, baseline, benefits, n_templates, len(candidates), queries)
             )
         if args.basis == 'max':
             this_cost = max(read_pred_costs)
@@ -338,29 +292,33 @@ def optimise(args):
         if this_cost < best_cost:
             best_cost = this_cost
             result = read
+    
+    if args.qaoa:
+        result = reads.lowest().first
 
     print(f'+++ ! annealing complete in {round(toc - tic, 2)}s')
     print('energy', result.energy)
     print('objective (z)', get_objective_value(result.sample))
-    for r in range(len(replicas)):
-        print(f'slack s^({r})', get_slack_value(result.sample, r))
-    
-    for r in range(len(replicas)):
-        z_val = sum(2**k * int(result.sample[f'z-{k}']) 
-                    for k in range(math.floor(math.log2(Z_max)) + 1))
-        load_val = sum(
-            result.sample[f't-q{q}-r{r}'] * (
-                1 * baseline[q] / 1 - 
-                sum(1 * benefits[i][q] / 1 * int(result.sample[f'x-i{i}-r{r}']) 
-                    for i in range(len(candidates)))
+    if args.basis == 'max':
+        for r in range(len(replicas)):
+            print(f'slack s^({r})', get_slack_value(result.sample, r))
+        
+        for r in range(len(replicas)):
+            z_val = sum(2**k * int(result.sample[f'z-{k}']) 
+                        for k in range(math.floor(math.log2(Z_max)) + 1))
+            load_val = sum(
+                result.sample[f't-q{q}-r{r}'] * (
+                    1 * baseline[q] / 1 - 
+                    sum(1 * benefits[i][q] / 1 * int(result.sample[f'x-i{i}-r{r}']) 
+                        for i in range(len(candidates)))
+                )
+                for q in queries
             )
-            for q in range(n_templates)
-        )
-        slack_val = sum(2**k * int(result.sample[f's-r{r}-{k}']) 
-                    for k in range(math.floor(math.log2(Z_max)) + 1))
-        residual = z_val - load_val - slack_val
-        print(f'replica {r}: z={z_val:.3f}, load={load_val:.3f}, '
-            f'slack={slack_val:.3f}, residual={residual:.3f}')
+            slack_val = sum(2**k * int(result.sample[f's-r{r}-{k}']) 
+                        for k in range(math.floor(math.log2(Z_max)) + 1))
+            residual = z_val - load_val - slack_val
+            print(f'replica {r}: z={z_val:.3f}, load={load_val:.3f}, '
+                f'slack={slack_val:.3f}, residual={residual:.3f}')
 
     indexes = []
     routes = [-1 for _ in range(n_templates)]
@@ -370,7 +328,7 @@ def optimise(args):
         indexes.append([])
         space = 0
         coeff_space = 0
-        pred_cost = get_cost(result.sample, r, baseline, benefits, n_templates, len(candidates))
+        pred_cost = get_cost(result.sample, r, baseline, benefits, n_templates, len(candidates), queries)
         pred_costs.append(pred_cost)
         print(f'- Replica {r}')
         print(f'-- Predicted query cost: {pred_cost}')
@@ -381,28 +339,24 @@ def optimise(args):
                 space += true_costs[i]
                 coeff_space += costs[i]
         for q in range(n_templates):
+            if q in updates:
+                routes[q] = -1
+                continue
             if result.sample[f't-q{q}-r{r}'] == 1:
                 if routes[q] != -1:
                     print(f'!! warn: query {q} routed to multiple replicas. inspect output!')
                 routes[q] = r
-        print(f'-- Space used: {space}/{args.storage_budget} '
-              f'({round(space / args.storage_budget, 4) * 100}%) '
-              f'({coeff_space} / {STORAGE_BUDGET})')
+        if not args.problem:
+            print(f'-- Space used: {space}/{args.storage_budget} '
+                f'({round(space / args.storage_budget, 4) * 100}%) '
+                f'({coeff_space} / {STORAGE_BUDGET})')
+        else:
+            print(f'-- Space used: {coeff_space} / {STORAGE_BUDGET} '
+                  f'({round(coeff_space / STORAGE_BUDGET, 4) * 100}%)')
 
     # Energy decomposition: shows relative scale of objective vs each penalty term
-    if objective_bqm is not None:
-        print(f'  manual energy check: {qubo.energy(result.sample):.2f}')
-        Q, qubo_offset = qubo.to_qubo()
-        from dimod import BinaryQuadraticModel
-        qubo_from_matrix = BinaryQuadraticModel.from_qubo(Q)
-        print(f'  qubo_offset: {qubo_offset:.2f}')
-        print(f'  energy via from_qubo (no offset): {qubo_from_matrix.energy(result.sample):.2f}')
-        print(f'  energy via from_qubo + offset:    {qubo_from_matrix.energy(result.sample) + qubo_offset:.2f}')
+    if args.basis == 'max':
         decompose_energy(result, qubo, objective_bqm, components, qubo.offset)
-    else:
-        # For total-cost basis, reconstruct a minimal objective proxy
-        from dimod import BinaryQuadraticModel as _ObjBQM
-        decompose_energy(result, qubo, _ObjBQM('BINARY'), components)
 
     print('- Index output for benchmarking module')
     idx_string = []
@@ -413,23 +367,23 @@ def optimise(args):
 
     print('- Routing table')
     print(','.join([str(r) for r in routes]))
-    print('- Objective value:', max(pred_costs))
+    basis_fn = max if args.basis == 'max' else sum
+    print('- Objective value:', basis_fn(pred_costs))
 
     with open('output.log', 'w') as outfile:
-        outfile.write(str(result))
-
+        outfile.write(str(result)) 
+    exit(0)
     # Diagnostic: print energy vs true cost for all reads to assess correlation.
     print('\n+++ read diagnostics (index, energy, z-objective, true max cost)')
     for i, read in enumerate(reads.data()):
         read_pred_costs = []
         for r in range(len(replicas)):
             read_pred_costs.append(
-                get_cost(read.sample, r, baseline, benefits, n_templates, len(candidates))
+                get_cost(read.sample, r, baseline, benefits, n_templates, len(candidates), queries)
             )
         print(f'{i}\tenergy {read.energy:.4f}\t'
               f'objective {get_objective_value(read.sample)}\t'
-              f'cost {max(read_pred_costs)}')
-
+              f'cost {basis_fn(read_pred_costs)}')
 
 if __name__ == '__main__':
     args = create_arguments()

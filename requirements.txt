@@ -6,4 +6,3 @@ qiskit-aer
 psycopg[binary]
 dimod
 dwave-samplers
-docplex

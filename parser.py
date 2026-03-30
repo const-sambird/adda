@@ -48,11 +48,14 @@ def add_alias_subquery(query_text):
 class WorkloadParser:
     def __init__(self, replica):
         self.workload = []
+        self.queries = []
+        self.updates = []
         self.templates = []
         self.columns = []
         self.table_of_columns = []
         self.candidates = []
         self.replica = replica
+        self.n_templates = -1
 
     def read_queries(self, path):
         '''
@@ -63,19 +66,32 @@ class WorkloadParser:
         all_queries = glob.glob(f'{path}/*.sql')
         query_names = [os.path.basename(q) for q in all_queries]
         name_parts = [q.split('_') for q in query_names]
-        template_strs = list(set([t[0] for t in name_parts]))
-        query_nums = list(set([int(q[1].strip('.sql')) for q in name_parts]))
+        template_strs = list(set(['_'.join(t[:-1]) for t in name_parts]))
+        query_nums = list(set([int(q[-1].strip('.sql')) for q in name_parts]))
+
+        self.n_templates = len(template_strs)
 
         for i, template in enumerate(template_strs):
-            #if int(template) > 3: continue
+            #if int(template) > 10: continue
             for query_num in query_nums:
-                with open(f'{path}/{template}_{query_num}.sql', 'r') as infile:
-                    lines = infile.readlines()
-                query = ' '.join(lines[1:])
+                try:
+                    with open(f'{path}/{template}_{query_num}.sql', 'r') as infile:
+                        lines = infile.readlines()
+                except:
+                    continue
+                if lines[0].startswith('--'):
+                    lines = lines[1:]
+                query = ' '.join(lines)
                 query = query.replace('\n', ' ').replace('\t', ' ')
                 query = update_query_text(query)
-                self.workload.append(query)
-                self.templates.append(int(template) - 1)
+                if 'select' in query.lower():
+                    self.workload.append(query)
+                    self.queries.append(int(template) - 1)
+                    self.templates.append(int(template) - 1)
+                else:
+                    self.workload.append(query)
+                    self.updates.append(int(template) - 1)
+                    self.templates.append(int(template) - 1)
 
     def get_all_columns(self):
         self.columns = []
@@ -91,7 +107,7 @@ class WorkloadParser:
 
 
     def extract_candidates(self):
-        REGEX = 'WHERE (.+?) (?:\\)|group by|order by)'
+        REGEX = 'WHERE (.+?)(?:\\)|group by|order by|;)'
         found_candidates = set()
 
         last_template = -1
@@ -116,6 +132,15 @@ class WorkloadParser:
     
     def get_templates(self):
         return self.templates
+
+    def get_num_templates(self):
+        return self.n_templates
+    
+    def get_queries(self):
+        return sorted(list(set(self.queries)))
+
+    def get_updates(self):
+        return sorted(list(set(self.updates)))
     
     def get_candidates(self):
         return self.candidates

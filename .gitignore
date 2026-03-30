@@ -2,6 +2,7 @@ replicas.csv
 .venv/
 __pycache__/
 workload/
+tpcc-workload/
 output.log
 model.pkl
 verify.py

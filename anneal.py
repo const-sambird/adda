@@ -1,9 +1,12 @@
 import math
 from dimod import ExactSolver, BinaryQuadraticModel, make_quadratic, quicksum
 from dwave.samplers import PathIntegralAnnealingSampler
+from qiskit_optimization import QuadraticProgram
+from qaoa import QAOAOptimiser
 from util import square_bqm_to_binary_polynomial
 
 BINARY_VARTYPE = 'BINARY'
+SAFETY_FACTOR = 1
 
 def create_slack_variables(name, S_max):
     """
@@ -49,7 +52,15 @@ def penalty_lambda_from_objective(objective_bqm: BinaryQuadraticModel,
     """
     objective_max = max_sum_coefficient(objective_bqm)
 
-    return objective_max ** 3
+    return objective_max ** 2
+
+def omega(Q, U, I, c, f, n_replicas):
+    cost = 0
+    for q in Q:
+        cost += f[q] * c[q]
+    for u in U:
+        cost += n_replicas * f[u] * c[u]
+    return cost
 
 
 def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
@@ -88,7 +99,7 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
     objective = create_slack_variables('z', Z_max)
 
     # lam_replica: must dominate the objective range.
-    lam_replica = max_sum_coefficient(objective)
+    lam_replica = omega(Q, U, I, c, f, n_replicas) * SAFETY_FACTOR
 
     replica_load_bqms = []
     routing_bqms = []
@@ -108,7 +119,7 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
             for i in I:
                 constraint_model.add_quadratic(
                     f'x-i{i}-r{r}', f't-q{q}-r{r}',
-                    -f[q] * v[i][q] / m
+                    f[q] * v[i][q] / m
                 )
 
         # Update cost: constant offset and -f(u)*v_i^u * x_i^r linear terms
@@ -137,7 +148,7 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
     # Deriving lam_routing from the assembled replica_load BQM ensures it
     # genuinely outweighs whatever energy the annealer gains by violating routing.
     replica_load_combined = quicksum(replica_load_bqms) if replica_load_bqms else BinaryQuadraticModel('BINARY')
-    lam_routing = penalty_lambda_from_objective(objective, multiplier=2.0)
+    lam_routing = (omega(Q, U, I, c, f, n_replicas) ** 3) + 1 * SAFETY_FACTOR
 
     # Hard routing constraint: lambda_routing * (sum_r t_q^r - m)^2
     for q in Q:
@@ -189,9 +200,7 @@ def make_total_cost_qubo(n_replicas, Q, U, I, c, f, v, m,
             for i in I:
                 objective.add_linear(f'x-i{i}-r{r}', -f[u] * v[i][u])
 
-    lam_routing = penalty_lambda_from_objective(
-        objective, multiplier=2.0 * n_replicas * (len(Q) + 1)
-    )
+    lam_routing = (omega(Q, U, I, c, f, n_replicas) ** 3) * n_replicas + 1
 
     routing_bqms = []
     for q in Q:
@@ -208,6 +217,7 @@ def make_total_cost_qubo(n_replicas, Q, U, I, c, f, v, m,
     full_qubo = quicksum([objective, *routing_bqms, *additional_constraints])
 
     components = {
+        'objective': objective,
         'routing':     routing_combined,
         'lam_routing': lam_routing,
     }
@@ -217,7 +227,7 @@ def make_total_cost_qubo(n_replicas, Q, U, I, c, f, v, m,
     return full_qubo, components
 
 
-def make_storage_constraint(r, candidates, costs, storage_budget, calibration_bqm):
+def make_storage_constraint(r, candidates, costs, storage_budget, calibration_bqm, queries, updates, n_replicas, baseline):
     """
     Build a penalised storage budget constraint for replica r:
         storage_budget - sum_i w_i x_i^r - s = 0
@@ -234,9 +244,7 @@ def make_storage_constraint(r, candidates, costs, storage_budget, calibration_bq
     storage_budget  : normalised storage budget (must be >= 1)
     calibration_bqm : BQM from which to derive lambda (use replica_load_combined)
     """
-    lam_storage = penalty_lambda_from_objective(
-        calibration_bqm, multiplier=2.0
-    )
+    lam_storage = (omega(queries, updates, candidates, baseline, [1 for _ in range(len(queries) + len(updates))], n_replicas) ** 3) + 1
 
     constraint_model = BinaryQuadraticModel(vartype='BINARY')
     constraint_model.offset = storage_budget
@@ -252,13 +260,32 @@ def make_storage_constraint(r, candidates, costs, storage_budget, calibration_bq
     hubo = square_bqm_to_binary_polynomial(constraint_model)
     qubo = make_quadratic(hubo, 2.0 * max_coeff, 'BINARY')
     qubo.scale(lam_storage)
-    return qubo
+    return qubo, lam_storage
 
 
-def anneal(qubo, mode='exact', num_reads=100):
-    assert mode in ('exact', 'anneal'), 'mode must be "exact" or "anneal"'
-    if mode == 'exact':
-        sampler = ExactSolver()
-    elif mode == 'anneal':
-        sampler = PathIntegralAnnealingSampler()
-    return sampler.sample(qubo, num_reads=num_reads)
+def anneal(qubo: BinaryQuadraticModel, algorithm='anneal', mode='simulate', num_reads=100):
+    assert algorithm in ('anneal', 'qaoa'), 'algorithm must be "anneal" or "qaoa"'
+    assert mode in ('simulate', 'quantum'), 'mode must be "simulate" or "quantum"'
+    if algorithm == 'anneal':
+        if mode == 'simulate':
+            sampler = ExactSolver()
+        elif mode == 'quantum':
+            sampler = PathIntegralAnnealingSampler()
+        return sampler.sample(qubo, num_reads=num_reads)
+    elif algorithm == 'qaoa':
+        optimiser = QAOAOptimiser(qubo.num_variables, 1, num_reads, mode)
+        qiskit_qubo = QuadraticProgram()
+        linear_dict = {}
+        quadratic_dict = {}
+        names = set()
+        for vars, bias in qubo.to_qubo()[0].items():
+            names.add(vars[0])
+            names.add(vars[1])
+            if vars[0] == vars[1]:
+                linear_dict[vars[0]] = bias
+            else:
+                quadratic_dict[vars] = bias
+        for name in names:
+            qiskit_qubo.binary_var(name)
+        qiskit_qubo.minimize(constant=qubo.offset, linear=linear_dict, quadratic=quadratic_dict)
+        return optimiser.optimise(qiskit_qubo)
