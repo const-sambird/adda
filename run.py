@@ -132,6 +132,7 @@ def create_arguments():
     parser.add_argument('-d', '--dry-run', action='store_true',
                         help="don't actually run the annealer")
     parser.add_argument('-p', '--problem', choices=PROBLEMS.keys(), type=str)
+    parser.add_argument('--workload-path', type=str, default='./workload')
     parser.add_argument('basis', type=str, choices=['total', 'max'],
                         help='cost basis for objective function')
 
@@ -141,7 +142,7 @@ def create_arguments():
 def optimise(args):
     replicas = get_replicas()
     parser = WorkloadParser(replicas[0])
-    parser.read_queries('./tpcc-workload')
+    parser.read_queries(args.workload_path)
     parser.get_all_columns()
     parser.extract_candidates()
 
