@@ -32,10 +32,12 @@ def get_benefit(query, indexes, replica):
 
 def compute_delta_overlap(workload, indexes, replica):
     delta = 0
-    
+    s = 0
+
     for i, query in enumerate(workload):
         print(f'- {i + 1} / {len(workload)}')
         baseline = get_benefit(query, [], replica)
+        s += baseline
         print(baseline)
         all_cost = get_benefit(query, indexes, replica)
         for to_remove in range(len(indexes)):
@@ -47,6 +49,7 @@ def compute_delta_overlap(workload, indexes, replica):
             if this_delta > delta:
                 delta = this_delta
     
+    print('sum:', s)
     return delta
 
 replica = Replica(1, 'localhost', '5432', 'tpchdb', 'sam')
