@@ -1,6 +1,6 @@
 import math
-from dimod import ExactSolver, BinaryQuadraticModel, make_quadratic, quicksum
-from dwave.samplers import PathIntegralAnnealingSampler
+from dimod import BinaryQuadraticModel, make_quadratic, quicksum
+from dwave.samplers import PathIntegralAnnealingSampler, SimulatedAnnealingSampler
 from qiskit_optimization import QuadraticProgram
 from qaoa import QAOAOptimiser
 from util import square_bqm_to_binary_polynomial
@@ -63,7 +63,7 @@ def omega(Q, U, I, c, f, n_replicas):
     return cost
 
 
-def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m,
+def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
                        additional_constraints=None):
     """
     Build a QUBO for the divergent design tuning problem on a maximum cost basis.
@@ -268,7 +268,7 @@ def anneal(qubo: BinaryQuadraticModel, algorithm='anneal', mode='simulate', num_
     assert mode in ('simulate', 'quantum'), 'mode must be "simulate" or "quantum"'
     if algorithm == 'anneal':
         if mode == 'simulate':
-            sampler = ExactSolver()
+            sampler = SimulatedAnnealingSampler()
         elif mode == 'quantum':
             sampler = PathIntegralAnnealingSampler()
         return sampler.sample(qubo, num_reads=num_reads)

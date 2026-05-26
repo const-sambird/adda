@@ -230,6 +230,7 @@ def optimise(args):
             [1 for _ in range(n_templates)],
             benefits,
             1,
+            0
         )
     else:
         qubo, components = make_total_cost_qubo(
