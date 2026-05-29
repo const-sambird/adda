@@ -6,3 +6,4 @@ tpcc-workload/
 output.log
 model.pkl
 verify.py
+fail-out.log

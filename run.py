@@ -62,10 +62,14 @@ def get_slack_value(sample, replica=0):
     return value
 
 
-def get_cost(sample, replica, baseline, benefits, n_queries, n_candidates, queries):
+def get_cost(sample, replica, baseline, benefits, n_queries, n_candidates, queries, failed=-1):
     cost = 0
+    def t(q, r):
+        if failed == -1:
+            return f't-q{q}-r{r}'
+        return f't-q{q}-r{r}-j{failed}'
     for query in range(n_queries):
-        if query in queries and sample[f't-q{query}-r{replica}'] == 0:
+        if query in queries and sample[t(query, replica)] == 0:
             continue
         cost += baseline[query]
         for index in range(n_candidates):
@@ -133,6 +137,7 @@ def create_arguments():
                         help="don't actually run the annealer")
     parser.add_argument('-p', '--problem', choices=PROBLEMS.keys(), type=str)
     parser.add_argument('--workload-path', type=str, default='./workload')
+    parser.add_argument('--alpha', type=float, default=0.0, help='per-node failure probability')
     parser.add_argument('basis', type=str, choices=['total', 'max'],
                         help='cost basis for objective function')
 
@@ -230,7 +235,7 @@ def optimise(args):
             [1 for _ in range(n_templates)],
             benefits,
             1,
-            0
+            args.alpha
         )
     else:
         qubo, components = make_total_cost_qubo(
@@ -322,39 +327,25 @@ def optimise(args):
             print(f'replica {r}: z={z_val:.3f}, load={load_val:.3f}, '
                 f'slack={slack_val:.3f}, residual={residual:.3f}')
 
-    indexes = []
-    routes = [-1 for _ in range(n_templates)]
-    pred_costs = []
+    indexes, routes, pred_costs = extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET)
 
-    for r in range(len(replicas)):
-        indexes.append([])
-        space = 0
-        coeff_space = 0
-        pred_cost = get_cost(result.sample, r, baseline, benefits, n_templates, len(candidates), queries)
-        pred_costs.append(pred_cost)
-        print(f'- Replica {r}')
-        print(f'-- Predicted query cost: {pred_cost}')
-        for i in range(len(candidates)):
-            if result.sample[f'x-i{i}-r{r}'] == 1:
-                indexes[r].append(candidates[i])
-                print('\t', candidates[i])
-                space += true_costs[i]
-                coeff_space += costs[i]
-        for q in range(n_templates):
-            if q in updates:
-                routes[q] = -1
-                continue
-            if result.sample[f't-q{q}-r{r}'] == 1:
-                if routes[q] != -1:
-                    print(f'!! warn: query {q} routed to multiple replicas. inspect output!')
-                routes[q] = r
-        if not args.problem:
-            print(f'-- Space used: {space}/{args.storage_budget} '
-                f'({round(space / args.storage_budget, 4) * 100}%) '
-                f'({coeff_space} / {STORAGE_BUDGET})')
-        else:
-            print(f'-- Space used: {coeff_space} / {STORAGE_BUDGET} '
-                  f'({round(coeff_space / STORAGE_BUDGET, 4) * 100}%)')
+    if args.alpha > 0:
+        with open('./fail-out.log', 'w') as outfile:
+            for r in range(len(replicas)):
+                outfile.write(f'replica-{r}-failed\n')
+                f_indexes, f_routes, f_pred_costs = extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET, r)
+                idx_string = []
+                for i_r, config in enumerate(f_indexes):
+                    for index in config:
+                        idx_string.append(f'{i_r},{index.column}')
+                outfile.write(' '.join(idx_string))
+                outfile.write('\n')
+                outfile.write(','.join([str(r) for r in f_routes]))
+                outfile.write('\n')
+                basis_fn = max if args.basis == 'max' else sum
+                outfile.write('objective,')
+                outfile.write(str(basis_fn(f_pred_costs)))
+                outfile.write('\n')
 
     # Energy decomposition: shows relative scale of objective vs each penalty term
     if args.basis == 'max':
@@ -386,6 +377,54 @@ def optimise(args):
         print(f'{i}\tenergy {read.energy:.4f}\t'
               f'objective {get_objective_value(read.sample)}\t'
               f'cost {basis_fn(read_pred_costs)}')
+
+def extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET, failed=-1):
+    indexes = []
+    routes = [-1 for _ in range(len(queries))]
+    pred_costs = []
+
+    def t(q, r):
+        if failed == -1:
+            return f't-q{q}-r{r}'
+        return f't-q{q}-r{r}-j{failed}'
+
+    if failed == -1:
+        print('================= BASELINE CASE =================')
+    else:
+        print(f'================= NODE {failed} FAILURE ==================')
+
+    for r in range(len(replicas)):
+        indexes.append([])
+        if r == failed: continue
+        space = 0
+        coeff_space = 0
+        pred_cost = get_cost(result.sample, r, baseline, benefits, len(queries), len(candidates), queries)
+        pred_costs.append(pred_cost)
+        print(f'- Replica {r}')
+        print(f'-- Predicted query cost: {pred_cost}')
+        for i in range(len(candidates)):
+            if result.sample[f'x-i{i}-r{r}'] == 1:
+                indexes[r].append(candidates[i])
+                print('\t', candidates[i])
+                space += true_costs[i]
+                coeff_space += costs[i]
+        for q in range(n_templates):
+            if q in updates:
+                routes[q] = -1
+                continue
+            if result.sample[t(q, r)] == 1:
+                if routes[q] != -1:
+                    print(f'!! warn: query {q} routed to multiple replicas. inspect output!')
+                routes[q] = r
+        if not args.problem:
+            print(f'-- Space used: {space}/{args.storage_budget} '
+                f'({round(space / args.storage_budget, 4) * 100}%) '
+                f'({coeff_space} / {STORAGE_BUDGET})')
+        else:
+            print(f'-- Space used: {coeff_space} / {STORAGE_BUDGET} '
+                  f'({round(coeff_space / STORAGE_BUDGET, 4) * 100}%)')
+    
+    return indexes, routes, pred_costs
 
 if __name__ == '__main__':
     args = create_arguments()

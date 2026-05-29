@@ -83,6 +83,7 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
                    the replica-load terms regardless of problem size.
                    This is the constraint that must never be violated.
     """
+    assert alpha * n_replicas <= 1, 'the convex combination over all probabilities must total 1'
     # Sanity check: Z_max should be achievable by a single replica
     max_single_replica_load = sum(f[q] * c[q] / m for q in Q)
     if Z_max > max_single_replica_load * 2:
@@ -97,6 +98,13 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
 
     # Build the objective BQM: min z^(0) = sum_k 2^k z_k
     objective = create_slack_variables('z', Z_max)
+
+    # build the failure terms z^(j)
+    subobjectives = []
+    if alpha > 0:
+        for r in range(n_replicas):
+            subobjective = create_slack_variables(f'z^({r})', Z_max)
+            subobjectives.append(subobjective)
 
     # lam_replica: must dominate the objective range.
     lam_replica = omega(Q, U, I, c, f, n_replicas) * SAFETY_FACTOR
@@ -150,6 +158,61 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
     replica_load_combined = quicksum(replica_load_bqms) if replica_load_bqms else BinaryQuadraticModel('BINARY')
     lam_routing = (omega(Q, U, I, c, f, n_replicas) ** 3) + 1 * SAFETY_FACTOR
 
+    # failure-aware replica load terms
+    failure_bqms = []
+    failure_routing_bqms = []
+    if alpha > 0:
+        for j in range(n_replicas):
+            for r in range(n_replicas):
+                if j == r: continue
+
+                constraint_model = BinaryQuadraticModel('BINARY')
+                # z^(j) terms
+                for var, bias in subobjectives[j].iter_linear():
+                    constraint_model.add_linear(var, bias)
+                
+                # Query cost: -f(q)/min{m, |R|-1} * c_q * t_q^(r,j)  and  -f(q)/min{m, |R|-1} * v_i^q * x_i^r * t_q^(r,j)
+                for q in Q:
+                    constraint_model.add_linear(f't-q{q}-r{r}-j{j}', -f[q] * c[q] / min(m, n_replicas - 1))
+                    for i in I:
+                        constraint_model.add_quadratic(
+                            f'x-i{i}-r{r}', f't-q{q}-r{r}-j{j}',
+                            f[q] * v[i][q] / min(m, n_replicas - 1)
+                        )
+
+                # Update cost: constant offset and -f(u)*v_i^u * x_i^r linear terms
+                for u in U:
+                    constraint_model.offset += -f[u] * c[u]
+                    for i in I:
+                        constraint_model.add_linear(f'x-i{i}-r{r}', -f[u] * v[i][u])
+
+                # Slack s^(r) in [0, Z_max] absorbs z^(0) - load_r
+                for var, bias in create_slack_variables(f's-j{j}-r{r}', Z_max).iter_linear():
+                    constraint_model.add_linear(var, -bias)
+
+                # The make_quadratic reduction strength must exceed the largest
+                # coefficient in the expression being squared.
+                max_coeff = max(
+                    (abs(b) for _, b in constraint_model.iter_linear()), default=1.0
+                )
+                hubo = square_bqm_to_binary_polynomial(constraint_model)
+                qubo = make_quadratic(hubo, 2.0 * max_coeff, 'BINARY')
+                qubo.scale(lam_replica)
+                failure_bqms.append(qubo)
+        
+        # failure routing constraints
+        for q in Q:
+            for j in range(n_replicas):
+                constraint_model = BinaryQuadraticModel('BINARY')
+                for r in range(n_replicas):
+                    if j == r: continue
+                    constraint_model.add_linear(f't-q{q}-r{r}-j{j}', 1)
+                constraint_model.offset = -min(m, n_replicas - 1)
+                hubo = square_bqm_to_binary_polynomial(constraint_model)
+                qubo = make_quadratic(hubo, 1.0, 'BINARY')
+                qubo.scale(lam_routing)
+                failure_routing_bqms.append(qubo)
+
     # Hard routing constraint: lambda_routing * (sum_r t_q^r - m)^2
     for q in Q:
         constraint_model = BinaryQuadraticModel('BINARY')
@@ -164,7 +227,12 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
     # Merge routing BQMs into one for decomposition reporting
     routing_combined = quicksum(routing_bqms) if routing_bqms else BinaryQuadraticModel('BINARY')
 
-    full_qubo = quicksum([objective, *replica_load_bqms, *routing_bqms, *additional_constraints])
+    # scale the objective according to the failure probability
+    objective.scale(1 - alpha)
+    for subobjective in subobjectives:
+        subobjective.scale(alpha / n_replicas)
+
+    full_qubo = quicksum([objective, *subobjectives, *replica_load_bqms, *routing_bqms, *failure_bqms, *failure_routing_bqms, *additional_constraints])
 
     components = {
         'replica_load': replica_load_combined,
