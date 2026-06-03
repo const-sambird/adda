@@ -398,7 +398,7 @@ def extract_configuration(result, replicas, queries, updates, baseline, benefits
         if r == failed: continue
         space = 0
         coeff_space = 0
-        pred_cost = get_cost(result.sample, r, baseline, benefits, len(queries), len(candidates), queries)
+        pred_cost = get_cost(result.sample, r, baseline, benefits, len(queries), len(candidates), queries, failed)
         pred_costs.append(pred_cost)
         print(f'- Replica {r}')
         print(f'-- Predicted query cost: {pred_cost}')
