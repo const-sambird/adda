@@ -1,6 +1,7 @@
 import sys
 import os
 import subprocess
+import random
 
 if __name__ == '__main__':
     n_runs = int(sys.argv[1])
@@ -23,16 +24,17 @@ if __name__ == '__main__':
 
             if len(lines) > 5:
                 n_reps = len(lines) // 5
-                for j in range(1, n_reps):
-                    f_config = lines[(j * 5) + 1].split(' ')
-                    f_config[-1].strip('\n')
-                    f_config = '\n'.join(f_config)
-                    f_routes = lines[(j * 5) + 2]
+                kill = random.randrange(n_reps)
+                j = kill
+                f_config = lines[(j * 5) + 1].split(' ')
+                f_config[-1].strip('\n')
+                f_config = '\n'.join(f_config)
+                f_routes = lines[(j * 5) + 2]
 
-                    with open(f'./configs/{prefix}_{i}_fail{j-1}.csv', 'a') as cf_outfile:
-                        cf_outfile.writelines(f_config)
-                    with open(f'./routes/{prefix}_{i}_fail{j-1}.csv', 'a') as rf_outfile:
-                        rf_outfile.write(f_routes.strip('\n'))
+                with open(f'./configs/{prefix}_{i}_fail{j-1}.csv', 'a') as cf_outfile:
+                    cf_outfile.writelines(f_config)
+                with open(f'./routes/{prefix}_{i}_fail{j-1}.csv', 'a') as rf_outfile:
+                    rf_outfile.write(f_routes.strip('\n'))
 
 
             with open(f'./configs/{prefix}_{i}.csv', 'a') as c_outfile:
