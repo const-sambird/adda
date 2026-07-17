@@ -24,8 +24,8 @@ if __name__ == '__main__':
 
             if len(lines) > 5:
                 n_reps = len(lines) // 5
-                kill = random.randrange(n_reps)
-                j = kill + 1
+                kill = random.randrange(1, n_reps)
+                j = kill
                 f_config = lines[(j * 5) + 1].split(' ')
                 f_config[-1].strip('\n')
                 f_config = '\n'.join(f_config)
