@@ -1,5 +1,6 @@
 import sys
 import os
+import shutil
 import subprocess
 import random
 
@@ -10,6 +11,11 @@ if __name__ == '__main__':
         prefix = sys.argv[2]
     else:
         prefix = 'adda'
+    
+    if len(sys.argv) > 3 and sys.argv[3] == 'clean':
+        SHOULD_CLEAN = True
+    else:
+        SHOULD_CLEAN = False
     
     os.makedirs('./configs', exist_ok=True)
     os.makedirs('./routes', exist_ok=True)
@@ -43,3 +49,7 @@ if __name__ == '__main__':
                 r_outfile.write(routes.strip('\n'))
     
     subprocess.run(['tar', '-czvf', f'{prefix}.tar.gz', 'configs/', 'routes/'])
+
+    if SHOULD_CLEAN:
+        shutil.rmtree('./configs')
+        shutil.rmtree('./routes')
