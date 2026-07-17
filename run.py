@@ -138,6 +138,7 @@ def create_arguments():
     parser.add_argument('-p', '--problem', choices=PROBLEMS.keys(), type=str)
     parser.add_argument('--workload-path', type=str, default='./workload')
     parser.add_argument('--alpha', type=float, default=0.0, help='per-node failure probability')
+    parser.add_argument('--log', type=str, help='where to write the recommendations')
     parser.add_argument('basis', type=str, choices=['total', 'max'],
                         help='cost basis for objective function')
 
@@ -329,23 +330,41 @@ def optimise(args):
 
     indexes, routes, pred_costs = extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET)
 
-    if args.alpha > 0:
-        with open('./fail-out.log', 'w') as outfile:
-            for r in range(len(replicas)):
-                outfile.write(f'replica-{r}-failed\n')
-                f_indexes, f_routes, f_pred_costs = extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET, r)
-                idx_string = []
-                for i_r, config in enumerate(f_indexes):
-                    for index in config:
-                        idx_string.append(f'{i_r},{index.column}')
-                outfile.write(' '.join(idx_string))
-                outfile.write('\n')
-                outfile.write(','.join([str(r) for r in f_routes]))
-                outfile.write('\n')
-                basis_fn = max if args.basis == 'max' else sum
-                outfile.write('objective,')
-                outfile.write(str(basis_fn(f_pred_costs)))
-                outfile.write('\n')
+    if args.log:
+        with open(args.log, 'w') as outfile:
+            outfile.write('no-failures\n')
+            idx_string = []
+            for i_r, config in enumerate(indexes):
+                for index in config:
+                    idx_string.append(f'{i_r},{index.column}')
+            outfile.write(' '.join(idx_string))
+            outfile.write('\n')
+            outfile.write(','.join([str(r) for r in routes]))
+            outfile.write('\n')
+            outfile.write(','.join([str(c) for c in pred_costs]))
+            outfile.write('\n')
+            basis_fn = max if args.basis == 'max' else sum
+            outfile.write('objective,')
+            outfile.write(str(basis_fn(pred_costs)))
+            outfile.write('\n')
+            if args.alpha > 0:
+                for r in range(len(replicas)):
+                    outfile.write(f'replica-{r}-failed\n')
+                    f_indexes, f_routes, f_pred_costs = extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET, r)
+                    idx_string = []
+                    for i_r, config in enumerate(f_indexes):
+                        for index in config:
+                            idx_string.append(f'{i_r},{index.column}')
+                    outfile.write(' '.join(idx_string))
+                    outfile.write('\n')
+                    outfile.write(','.join([str(r) for r in f_routes]))
+                    outfile.write('\n')
+                    outfile.write(','.join([str(c) for c in f_pred_costs]))
+                    outfile.write('\n')
+                    basis_fn = max if args.basis == 'max' else sum
+                    outfile.write('objective,')
+                    outfile.write(str(basis_fn(f_pred_costs)))
+                    outfile.write('\n')
 
     # Energy decomposition: shows relative scale of objective vs each penalty term
     if args.basis == 'max':

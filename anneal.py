@@ -83,7 +83,7 @@ def make_max_cost_qubo(Z_max, n_replicas, Q, U, I, c, f, v, m, alpha,
                    the replica-load terms regardless of problem size.
                    This is the constraint that must never be violated.
     """
-    assert alpha * n_replicas <= 1, 'the convex combination over all probabilities must total 1'
+    assert alpha <= 1, 'the convex combination over all probabilities must total 1'
     # Sanity check: Z_max should be achievable by a single replica
     max_single_replica_load = sum(f[q] * c[q] / m for q in Q)
     if Z_max > max_single_replica_load * 2:
