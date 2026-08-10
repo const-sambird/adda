@@ -41,8 +41,10 @@ def square_bqm_to_binary_polynomial(bqm: dimod.BinaryQuadraticModel):
     # cross terms (2ab)
     for i in range(n):
         t1, c1 = terms[i]
+        if c1 == 0: continue
         for j in range(i + 1, n):
             t2, c2 = terms[j]
+            if c2 == 0: continue
             new_term = multiply_terms(t1, t2)
             result[new_term] += 2 * c1 * c2
 
