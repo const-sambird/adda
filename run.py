@@ -274,7 +274,8 @@ def optimise(args):
 
     if args.dry_run:
         print('!!! stop due to user request')
-        print('- indexes for export:', candidates)
+        print('- indexes for export:')
+        print([c.column for c in candidates])
         with open('model.pkl', 'wb') as outfile:
             pickle.dump(qubo.to_qubo(), outfile)
         return
@@ -399,7 +400,7 @@ def optimise(args):
 
 def extract_configuration(result, replicas, queries, updates, baseline, benefits, candidates, costs, true_costs, n_templates, STORAGE_BUDGET, failed=-1):
     indexes = []
-    routes = [-1 for _ in range(len(queries))]
+    routes = [-1 for _ in range(n_templates)]
     pred_costs = []
 
     def t(q, r):
